@@ -1,0 +1,40 @@
+<h2 class="sr-only">Sequence diagram showing the flow when a user saves a study session, distinguishing feedback that always fires from feedback that only fires conditionally</h2>
+<div id="seq"></div>
+<script type="module">
+import mermaid from 'https://esm.sh/mermaid@11/dist/mermaid.esm.min.mjs';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+await document.fonts.ready;
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'base',
+  fontFamily: '"Anthropic Sans", sans-serif',
+  themeVariables: {
+    darkMode: dark,
+    fontSize: '13px',
+    fontFamily: '"Anthropic Sans", sans-serif',
+    lineColor: dark ? '#9c9a92' : '#73726c',
+    textColor: dark ? '#c2c0b6' : '#3d3d3a',
+  },
+});
+const { svg } = await mermaid.render('seq-svg', `sequenceDiagram
+  actor User
+  participant UI as Timer UI
+  participant API as Next.js API
+  participant DB as Supabase
+
+  User->>UI: Stop and save session
+  UI->>API: POST /api/sessions
+  API->>DB: Insert session row
+  DB-->>API: Row saved
+  API->>DB: Sum total minutes for user
+  DB-->>API: Total minutes and badge check
+  API-->>UI: Response
+  UI-->>User: Update total time and heatmap cell
+  opt Daily goal met
+    UI-->>User: Goal complete animation
+  end
+  opt New badge threshold crossed
+    UI-->>User: Badge unlock animation
+  end`);
+document.getElementById('seq').innerHTML = svg;
+</script>
