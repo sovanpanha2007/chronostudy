@@ -1,0 +1,18 @@
+# Production values are supplied through Vercel environment variables.
+.env*
+**/.env*
+
+# Local database files, generated output, and development-only material.
+/supabase/
+/.next/
+/node_modules/
+/coverage/
+*.tsbuildinfo
+/docs/
+/tests/
+/vitest.config.mts
+**/*.test.ts
+/.claude/
+/.codex/
+/.agents/
+CLAUDE.local.md

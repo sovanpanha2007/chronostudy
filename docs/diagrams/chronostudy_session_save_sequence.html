@@ -19,17 +19,16 @@ mermaid.initialize({
 const { svg } = await mermaid.render('seq-svg', `sequenceDiagram
   actor User
   participant UI as Timer UI
-  participant API as Next.js API
-  participant DB as Supabase
+  participant DB as Supabase database functions
 
+  Note over UI: Local recovery checkpoints; cloud save every 5 minutes
   User->>UI: Stop and save session
-  UI->>API: POST /api/sessions
-  API->>DB: Insert session row
-  DB-->>API: Row saved
-  API->>DB: Sum total minutes for user
-  DB-->>API: Total minutes and badge check
-  API-->>UI: Response
-  UI-->>User: Update total time and heatmap cell
+  UI->>UI: Persist final snapshot in user-scoped queue
+  UI-->>User: Update total time and heatmap immediately
+  UI->>DB: Finalize UUID, revision, confirmed duration
+  Note over DB: Validate ownership/revision; save and award badges atomically
+  DB-->>UI: Acknowledgement, totals, day, session, badge results
+  UI->>UI: Reconcile confirmed server results
   opt Daily goal met
     UI-->>User: Goal complete animation
   end

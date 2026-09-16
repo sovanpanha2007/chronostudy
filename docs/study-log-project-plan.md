@@ -30,7 +30,8 @@ Each feature below includes the mechanic as decided, the reasoning behind it, an
 - **Minimum session duration**: 5 minutes. Sessions stopped before this are silently discarded — no session row is created, no message shown. Chosen for a clean, unambiguous cutoff over showing a "too short" message; can be loosened later if it turns out to feel too strict for short legitimate sessions.
 - **Session log**: collapsed by default, showing only the 3 most recent sessions as a compact link/list (reference: Session app's "Session log" link). Clicking it expands to show the full past week — not all-time history.
 - **Full history access**: anything older than a week is reached by clicking a specific day on the heatmap, which shows that day's session breakdown. The heatmap remains the only place for genuine long-term history; the session log is a fast, short-range check, not a browsing tool.
-- **Tab close / crash handling**: closing the tab **ends** the session rather than pausing it — simpler than pause-and-resume, and avoids having to invent abandoned-session cleanup rules or cross-device resume logic. Since a hard crash may not reliably fire a close event, the timer **autosaves elapsed time to Supabase every 30–60 seconds** while running, not just once at the end — worst case loses under a minute, not the whole session. Stepping away and coming back later produces two separate session entries rather than one continuous one; daily totals and heatmap color still sum correctly either way. The 5-minute minimum duration rule applies the same at this close point as anywhere else.
+- **Timer recovery & sync (updated 2026-09-09)**: run locally; persist recovery state roughly every 10 seconds while executable. First cloud save at five minutes, then every five minutes and on pause/stop. Recover the same session after reload; ask whether uncertain time away should count instead of silently discarding it. Explicit pauses never count. Queue multiple offline sessions safely; retries must not duplicate or overwrite newer saves. Backup timing is best effort during browser suspension. Full contract: `docs/SPEC.md` §2.
+
 
 ### 4.1 Streak (loss aversion) — deferred to phase 2
 
@@ -200,7 +201,7 @@ Tables live in Supabase/Postgres. `sessions` is the single source of truth — h
 | session_date | date | the day it counts toward, in the user's local timezone |
 | duration_seconds | int | |
 | subject | text, nullable | optional tag |
-| goal_minutes_at_time | int | snapshot of the user's goal when saved — prevents a later goal change from silently rewriting past heatmap colors |
+| goal_minutes_at_time | int | snapshot of the user's goal at session start — prevents a later goal change from silently rewriting past heatmap colors |
 | created_at | timestamptz | actual save time, for ordering "recent sessions" |
 
 **`badges`** (reference data — may start as a hardcoded array in code rather than a real table until badges need to be added without a redeploy)

@@ -1,6 +1,6 @@
 # Chronostudy — Phase 1 Implementation Spec
 
-**Status**: ready to build · **Date**: 2026-08-14
+**Status**: ready to build · **Updated**: 2026-09-09 (timer design)
 **Companion to**: `docs/study-log-project-plan.md` (product/design source of truth)
 
 This document is the *engineering* spec. Where the project plan says what to build and why, this says
@@ -63,8 +63,9 @@ so `proxy.ts` can make redirect decisions from the same call.
 
 ## 1. Schema changes
 
-One new migration, `supabase/migrations/20260814000000_phase1_fixes.sql`. The init migration is not
-edited — it is already applied to the hosted project.
+Baseline migration: `supabase/migrations/20260814000000_phase1_fixes.sql`. Do not edit applied
+migrations. The timer revision requires a follow-up migration for session revisions, finalization state, and the
+authenticated save/finalize database functions (§2.4, §6.1); these are not implemented below.
 
 ```sql
 -- 1. Onboarding gate. The signup trigger creates a profiles row with defaults
@@ -76,7 +77,7 @@ alter table public.profiles add column onboarded_at timestamptz;
 --    break across DST). Captured at signup, editable in settings.
 alter table public.profiles add column timezone text not null default 'UTC';
 
--- 3. The timer INSERTs at the 5-minute mark then UPDATEs every 30-60s.
+-- 3. The timer first saves at five minutes, then every five minutes.
 --    The init migration has no UPDATE policy, so every autosave after the
 --    first would silently fail.
 create policy "Users can update their own sessions"
@@ -84,10 +85,8 @@ create policy "Users can update their own sessions"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
--- 4. Badge unlocks are detected and inserted client-side. Postgres independently
---    verifies the threshold was actually earned, so a user cannot grant
---    themselves a badge — which matters once the phase 2 friends leaderboard
---    makes badges publicly visible.
+-- 4. Badge inserts must satisfy the stored session total. Finalization (§5)
+--    checks and awards badges in Postgres; this policy guards the threshold.
 create policy "Users can unlock badges they have earned"
   on public.user_badges for insert
   with check (
@@ -131,98 +130,66 @@ bypasses RLS, exposing every user's daily totals to every other user.
 
 ## 2. Timer & session lifecycle
 
-The hardest part of the build. Everything below is client-side state in a `<Timer>` client
-component, writing directly to Supabase (§6).
+**Decision (2026-09-09):** local timer and recovery, five-minute cloud backups, recoverable time
+away. This replaces 45-second autosaves and automatic deletion of gaps over two minutes.
 
-### 2.1 Elapsed time is accumulated from timestamp deltas, never from tick counts
+### 2.1 Local timing & recovery
 
-Counting `setInterval` firings is wrong twice over: intervals drift, and browsers throttle
-background tabs to roughly one tick per minute. A user who tabs away to their reading material —
-the normal case for a study timer — would watch their time stop counting.
+- Calculate elapsed time from timestamps, never tick counts. Explicit pauses never count.
+- On start, generate a stable session UUID and snapshot the starting time, profile timezone/date,
+  and goal. No server request. Resume keeps the same session.
+- Persist state locally on transitions and roughly every 10 seconds while executable, even online.
+  Store confirmed duration, timing anchors, uncertain intervals, revision, subject, and sync state.
+- Ordinary tab switching keeps counting. A callback gap over 120 seconds flags an **uncertain
+  interval**, not proof of sleep; retain it separately from confirmed duration.
+- On return from an uncertain gap or crash/reload, pause for review: “You were away for 42 minutes.
+  Include that time?” Include or exclude it, then resume or finish. Never upload uncertain time
+  before confirmation; time spent answering stays paused. Recover the same session after reload.
+- Keep the existing long-session check at goal + 2 hours, re-arming every 2 hours after confirmation.
+  Ignoring either prompt leaves the timer paused. Only one tab may control a session.
 
-```
-state: { startedAt, accumulatedMs, lastTickAt, status }
-status: 'idle' | 'running' | 'paused' | 'checking-presence'
+### 2.2 Server request schedule
 
-on tick (every 250ms while running):
-  delta = now - lastTickAt
-  if delta > SLEEP_GAP_MS:        // 120_000
-      -> do NOT add delta
-      -> status = 'checking-presence'   (see 2.3)
-  else:
-      accumulatedMs += delta
-  lastTickAt = now
-
-display = floor(accumulatedMs / 1000)
-```
-
-Accumulating real deltas means a throttled 60-second background tick correctly adds 60 seconds.
-`SLEEP_GAP_MS = 120s` sits deliberately above the ~60s background-throttle floor, so ordinary
-tabbing away never trips it, while a slept laptop or frozen tab always does.
-
-**The tab being hidden does not pause the timer.** Studying happens away from the screen. No idle or
-foreground detection — §4.5 of the plan rules it out for v1.
-
-### 2.2 Write schedule
-
-| Moment | Action |
+| Moment | Request |
 |---|---|
-| `accumulatedMs` first reaches 300s (5 min) | `INSERT` the sessions row |
-| every 45s thereafter while running | `UPDATE duration_seconds` |
-| pause | one final `UPDATE`, then stop writing |
-| resume | continue writing to the **same row** |
-| stop | final `UPDATE`, then badge check (§5) |
-| stop before 5:00 | nothing was ever written — discard silently, no message |
+| Start / resume / display tick | None |
+| First five confirmed minutes | Save session |
+| Every five minutes afterward while running | Save latest changed duration |
+| Pause / presence check | Save changed qualifying duration, then stop periodic writes |
+| Stop | Finalize qualifying session; return totals and badge results |
+| Stop below five minutes | Discard locally; no server row or message |
+| Reconnect / next app load | Flush pending qualifying saves |
 
-The 5-minute minimum is enforced by simply not inserting, which matches the existing
-`check (duration_seconds >= 300)` constraint rather than fighting it.
+Coalesce a coincident checkpoint and stop into one finalization. Update the UI immediately from
+local state; reconcile with the server response. No polling or Realtime subscription is needed.
 
-A crashed session leaves an open row holding whatever the last autosave wrote. **This is accepted
-and unmarked** — no `ended_at`, no status column, no cleanup job. A crashed session is just a
-slightly short session; the time in it was really studied. Worst case loses under 45 seconds.
+For one uninterrupted hour: about **12 save requests versus 75** with the old schedule (~84% fewer),
+excluding reads, auth, retries, and pauses. Supabase includes standard API requests; this reduces
+compute work and traffic, not a per-save fee ([pricing](https://supabase.com/pricing)).
 
-### 2.3 Presence check — "Are you still there?"
+### 2.3 Offline & lifecycle limits
 
-Replaces a hard session cap. A hard cap either clips legitimate long sessions or lets a closed
-laptop lid write a 9-hour lie into a record whose entire value is being trustworthy.
+Maintain a persistent, user-scoped queue with one latest pending snapshot per session, including
+multiple sessions completed offline. Retry transient failures with exponential backoff and jitter,
+and on reconnect/app load; retain data until acknowledged. Authentication failures wait for sign-in.
+Show “Saved on this device — waiting to sync” only after local persistence succeeds; surface storage
+failures rather than claiming recovery is available.
 
-Two independent triggers put the timer into `checking-presence`, which **auto-pauses immediately**
-(freezing `accumulatedMs`, writing one final `UPDATE`) and shows a modal:
+Save locally when the page becomes hidden; any departure network flush is best effort. Frozen pages
+cannot run scheduled backups and closing events are unreliable. Five minutes is a backup target
+while connected and executable, not a suspension/offline guarantee. Device loss or cleared storage
+loses anything unsynced ([browser lifecycle](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)).
 
-1. **Sleep gap** — a tick delta over 120s (§2.1). Catches the closed lid, the discarded tab, the
-   suspended machine. This is the trigger that actually does the work, because a frozen tab cannot
-   run a timer to notice anything else.
-2. **Long session** — `accumulatedMs` crosses `(daily_goal_minutes + 120) * 60_000`. Scales with the
-   user's own goal, so the 4hr-goal preset is never blocked from reaching 100%. Re-arms every 2h
-   after a confirmation.
+### 2.4 Safe saves
 
-Modal copy is encouraging, not accusatory (§6 design values): *"Still studying? Your timer's paused
-at 2h 14m."* → **[Keep going]** resumes in place · **[Finish here]** stops and saves.
+Send the stable UUID, absolute confirmed duration, and increasing revision. Apply revisions
+atomically: duplicate retries are harmless and older writes cannot overwrite newer state. A lost
+response never implies an INSERT failed. Finalization must also be retry-safe and prevent delayed
+checkpoints reopening a finished session. Enforce ownership in Postgres; keep checkpoints cheap.
 
-Dismissing or ignoring the modal leaves the session paused indefinitely — harmless, since a paused
-row is already saved at its last honest value.
+### 2.5 Subject
 
-### 2.4 Pause semantics
-
-Pause freezes accrual; paused wall-clock time never counts. The row stays open and resume continues
-writing to it, so a pause never fragments one study block into two log entries.
-
-### 2.5 Offline behavior
-
-The timer is local and keeps running regardless of network. On a failed write:
-
-- Buffer `{ rowId | null, startedAt, accumulatedMs, sessionDate, goalMinutes, subject }` to
-  `localStorage['chronostudy:pending']`.
-- Retry on the next 45s tick and on the `window.online` event.
-- If `rowId` is null the INSERT never landed — retry as an INSERT with the buffered elapsed value.
-- Show a quiet inline indicator: *"Offline — saved on this device."* Not a blocking error.
-- Flush any leftover buffer on next app load.
-
-### 2.6 Subject
-
-Optional free-text input beside the timer, with autocomplete from the user's distinct past subjects
-(`select distinct subject from sessions where user_id = auth.uid() and subject is not null`). Type
-it once, then it's a one-tap chip forever after. Never required; NULL is valid.
+Optional free text with autocomplete from the user's distinct past subjects; NULL is valid.
 
 ---
 
@@ -237,7 +204,7 @@ and "my commit landed on the wrong square" is a perennial support thread. Do not
   `Intl.DateTimeFormat().resolvedOptions().timeZone`, editable in settings.
 - **A session counts toward the local date on which it started** — the day the user began, not the
   day they finished. A 23:40 → 00:20 session belongs entirely to the earlier day.
-- `session_date` is computed once, at INSERT, from `startedAt` in the profile's stored zone — not
+- `session_date` is computed once, at start, from `startedAt` in the profile's stored zone — not
   the browser's current zone, so travel or a mis-set second device cannot split a day.
 
 ```ts
@@ -266,7 +233,7 @@ precisely why `sessions.goal_minutes_at_time` exists.
 
 ### 4.2 Per-day fraction
 
-Each session contributes against the goal that was in force when *it* was saved, summed per day:
+Each session contributes against the goal snapshotted when *it* started, summed per day:
 
 ```
 goal_fraction = Σ (duration_seconds / (goal_minutes_at_time × 60))
@@ -313,21 +280,10 @@ week (§5.2 of the plan).
 Cumulative lifetime minutes, `sum(duration_seconds) / 60` across all sessions. Eight tiers (§1),
 with the first reachable inside day one so a new user meets the mechanic immediately.
 
-Detection runs **client-side after a session is saved**:
-
-```ts
-export function detectNewBadges(totalMinutes: number, unlocked: Set<string>, ladder: Badge[]): Badge[] {
-  return ladder.filter(b => b.threshold_minutes <= totalMinutes && !unlocked.has(b.id));
-}
-```
-
-Newly detected badges are inserted into `user_badges`; the RLS policy from §1 independently
-re-verifies each threshold against the sessions table, so the client is trusted for *timing* but
-never for *truth*. The `user_badges` row is what gates the unlock animation to once per badge, per
-the plan.
-
-Detection fires **on stop only**, never mid-session — interrupting an active study session with a
-celebration animation would be hostile to the thing the app exists to protect.
+The finalization database function saves the session, checks cumulative thresholds, inserts earned
+`user_badges` without duplicates, and returns totals and badge results in one transaction/request.
+Periodic checkpoints do not check badges. The client celebrates confirmed new unlocks on completion
+(or after an offline completion syncs), never during an active session. Retries must not replay awards.
 
 **Deleting a session never revokes a badge.** [extends plan] Once celebrated, it stays. Un-awarding
 something contradicts §6's "rooting for the user," and the alternative — animation state that can run
@@ -341,10 +297,10 @@ backwards — is worse to build than to live with.
 
 - **Reads**: Server Components fetch profile, `daily_totals`, recent sessions, and unlocked badges
   on load via the server client. Fast first paint, heatmap is server-rendered.
-- **Writes**: the `<Timer>` client component writes directly through the browser client on its
-  30–60s tick. RLS enforces ownership; no API layer to build or keep in sync.
-- After stop, call `router.refresh()` to re-pull server data, with the heatmap cell updated
-  optimistically first so feedback is instant.
+- **Writes**: browser → authenticated Supabase database functions, on the §2.2 schedule. Enforce
+  ownership/RLS and revision checks; no intermediate Next.js API or Edge Function per save.
+- Checkpoints return a small acknowledgement. Finalization returns updated totals, the affected
+  day, session, and badge results; reconcile local UI without a routine full-page data refresh.
 
 ### 6.2 Routes
 
@@ -369,13 +325,20 @@ src/
     supabase/{client,server,proxy}.ts    # moved from utils/, now under @/*
     time.ts                  # resolveSessionDate, formatDuration, elapsed math
     heatmap.ts               # goalFractionToLevel, calendar grid builder
-    badges.ts                # detectNewBadges, ladder types
+    badges.ts                # ladder types and badge presentation
+    goals.ts                 # shared goal options, independent of UI screens
+    auth.ts                  # server-only verified account/profile access
+    http.ts                  # private auth response headers
   app/
     layout.tsx  globals.css  page.tsx
     login/  onboarding/  app/  auth/
   components/
-    Timer.tsx  Heatmap.tsx  StatsRow.tsx  SessionLog.tsx
-    PresenceCheckModal.tsx  BadgeUnlock.tsx  SettingsModal.tsx
+    auth/                    # LoginForm, Onboarding
+    study/                   # StudyApp, Timer, Heatmap, SessionLog, SettingsModal
+    ui/                      # shared Modal
+    Brand.tsx                # shared branding
+tests/                       # SQL integration and authentication boundary tests
+supabase/migrations/         # new changes append migrations; applied files stay immutable
 ```
 
 ---
@@ -448,8 +411,10 @@ permanent** — it corrupts a record the user cannot reconstruct:
 
 - `resolveSessionDate(startedAt, tz)` — including the 23:40→00:20 midnight case and a DST boundary
 - `goalFractionToLevel(f)` — boundaries at 0, 0.25, 0.75, 0.999, 1.0, 3.0
-- `detectNewBadges(total, unlocked, ladder)` — including crossing two tiers in one session
-- elapsed accumulation — a >120s delta must not be added, a 60s throttled delta must be
+- elapsed accumulation — a >120s gap stays pending until confirmed; a normal 60s delta counts
+- recovery/retry logic — duplicate and stale revisions, account-scoped queues, pause exclusion
+
+Verify database finalization separately: multiple badge thresholds, duplicate requests, and RLS.
 
 ---
 
@@ -458,7 +423,7 @@ permanent** — it corrupts a record the user cannot reconstruct:
 **Stage 0 — corrections** (§0): ~~move the migration~~ (done), move `utils/` → `src/lib/`, write
 `src/proxy.ts`, fix the session-refresh helper. Verify `npx supabase db reset` creates tables.
 
-**Stage 1 — schema**: the phase-1-fixes migration (§1). Confirm the badge seed landed and that
+**Stage 1 — schema**: baseline and timer follow-up migrations (§1). Confirm the badge seed landed and that
 `daily_totals` returns only your own rows when queried as a second user.
 
 **Stage 2 — auth & onboarding**: providers + linking, `/login`, callbacks, the 6 screens, the
@@ -479,10 +444,12 @@ reduced-motion check, deploy.
 - `npx supabase db reset` → tables exist, 8 badge rows present.
 - Sign up with email, then Google, same address → **one** account, one heatmap.
 - Start timer, stop at 4:59 → no row. Stop at 5:01 → one row.
-- Start timer, watch the network tab → INSERT at 5:00, UPDATE every ~45s.
-- Devtools offline → timer keeps running, indicator appears, buffer flushes on reconnect.
+- Start timer → first save at 5:00, then every ~5 minutes; pause/stop flush changed data.
+- Offline → complete multiple sessions, reload, reconnect → all sync once, under the same account.
+- Drop a save response / reorder requests → no duplicate row or duration rollback.
+- Open two tabs → only one controls the session; finalization retries do not replay rewards.
 - Set system clock to 23:50, run a session past midnight → lands on the *earlier* day's cell.
-- Sleep the laptop mid-session, reopen → presence modal, elapsed did **not** jump.
+- Sleep/reload mid-session → recover saved state; include/exclude the uncertain gap explicitly.
 - Set goal to 30 min, study 30 min → level 5 cell + goal-met animation. Study 90 more → still level 5.
 - Study 60 min total → `first-hour` badge unlock animation, exactly once (reload, no replay).
 - In SQL, try inserting a `master` badge for yourself directly → RLS rejects it.

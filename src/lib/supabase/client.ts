@@ -7,4 +7,5 @@ export const createClient = () =>
   createBrowserClient(
     supabaseUrl!,
     supabaseKey!,
+    { cookieOptions: { secure: process.env.NODE_ENV === 'production' } },
   );
