@@ -61,6 +61,7 @@ Supabase Auth, OAuth providers or concurrent requests against Supabase.
 | Open `/app` while signed out | Redirect to login. |
 | Complete onboarding, skipping the name | Generated name; timer ready; recommended goal is 1 hour. |
 | Start, pause, wait a few seconds, resume | Paused time is excluded. No cloud save before five confirmed minutes. |
+| Leave the timer tab open while working in another tab/app for over two minutes | Timer keeps counting; returning shows the full elapsed time without a presence prompt. |
 | Reload during the first minute | Same session returns paused; include/exclude the time away explicitly. |
 | Open another app tab | Only one tab controls the timer. Close its tab to allow takeover. |
 | At five minutes, inspect Network | One `save_study_session` request; heatmap and totals update. |
@@ -70,7 +71,7 @@ Supabase Auth, OAuth providers or concurrent requests against Supabase.
 | Tap today’s square; delete the completed session | Session removed from totals and heatmap; earned badges remain. |
 | Use a 375px viewport and reduced motion | No page overflow; heatmap scrolls to today; dialogs and controls remain usable. |
 
-The automated tests cover longer waits without spending hours: presence checks,
+The automated tests cover longer waits without spending hours: background gaps and long sessions,
 multiple badge thresholds, stale/duplicate saves, goal color boundaries, midnight,
 DST, and offline recovery. To see goal and badge celebrations live, complete
 enough study time to reach your selected goal and the first 60-minute badge.

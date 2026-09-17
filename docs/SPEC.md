@@ -140,13 +140,13 @@ away. This replaces 45-second autosaves and automatic deletion of gaps over two 
   and goal. No server request. Resume keeps the same session.
 - Persist state locally on transitions and roughly every 10 seconds while executable, even online.
   Store confirmed duration, timing anchors, uncertain intervals, revision, subject, and sync state.
-- Ordinary tab switching keeps counting. A callback gap over 120 seconds flags an **uncertain
-  interval**, not proof of sleep; retain it separately from confirmed duration.
-- On return from an uncertain gap or crash/reload, pause for review: “You were away for 42 minutes.
+- Tab switching, working in another app, and delayed background callbacks keep counting from
+  timestamps, regardless of gap length. Catch up and queue qualifying time on return.
+- After a crash/reload, pause for review: “You were away for 42 minutes.
   Include that time?” Include or exclude it, then resume or finish. Never upload uncertain time
   before confirmation; time spent answering stays paused. Recover the same session after reload.
-- Keep the existing long-session check at goal + 2 hours, re-arming every 2 hours after confirmation.
-  Ignoring either prompt leaves the timer paused. Only one tab may control a session.
+- No automatic presence checks interrupt long sessions. Users pause or finish explicitly.
+  Ignoring a recovery prompt leaves the timer paused. Only one tab may control a session.
 
 ### 2.2 Server request schedule
 
@@ -155,7 +155,7 @@ away. This replaces 45-second autosaves and automatic deletion of gaps over two 
 | Start / resume / display tick | None |
 | First five confirmed minutes | Save session |
 | Every five minutes afterward while running | Save latest changed duration |
-| Pause / presence check | Save changed qualifying duration, then stop periodic writes |
+| Pause | Save changed qualifying duration, then stop periodic writes |
 | Stop | Finalize qualifying session; return totals and badge results |
 | Stop below five minutes | Discard locally; no server row or message |
 | Reconnect / next app load | Flush pending qualifying saves |
@@ -411,7 +411,7 @@ permanent** — it corrupts a record the user cannot reconstruct:
 
 - `resolveSessionDate(startedAt, tz)` — including the 23:40→00:20 midnight case and a DST boundary
 - `goalFractionToLevel(f)` — boundaries at 0, 0.25, 0.75, 0.999, 1.0, 3.0
-- elapsed accumulation — a >120s gap stays pending until confirmed; a normal 60s delta counts
+- elapsed accumulation — long background gaps count, without presence checks or double counting
 - recovery/retry logic — duplicate and stale revisions, account-scoped queues, pause exclusion
 
 Verify database finalization separately: multiple badge thresholds, duplicate requests, and RLS.
@@ -449,7 +449,8 @@ reduced-motion check, deploy.
 - Drop a save response / reorder requests → no duplicate row or duration rollback.
 - Open two tabs → only one controls the session; finalization retries do not replay rewards.
 - Set system clock to 23:50, run a session past midnight → lands on the *earlier* day's cell.
-- Sleep/reload mid-session → recover saved state; include/exclude the uncertain gap explicitly.
+- Switch tabs/apps or suspend callbacks mid-session → full elapsed time counts on return.
+- Reload mid-session → recover saved state; include/exclude the uncertain gap explicitly.
 - Set goal to 30 min, study 30 min → level 5 cell + goal-met animation. Study 90 more → still level 5.
 - Study 60 min total → `first-hour` badge unlock animation, exactly once (reload, no replay).
 - In SQL, try inserting a `master` badge for yourself directly → RLS rejects it.
