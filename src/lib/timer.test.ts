@@ -11,16 +11,15 @@ const session = (revision = 10): StudySession => ({ id: timer().id, user_id: pro
   goal_minutes_at_time: 60, subject: 'Math', started_at: new Date(start).toISOString(), timezone: profile.timezone, revision, finalized_at: null, deleted_at: null });
 
 describe('elapsed time and review', () => {
-  it('counts ordinary background gaps but holds uncertain time for consent', () => {
+  it('counts long background gaps without pausing or counting them twice', () => {
     const normal = advanceTimer(timer(), start + 60_000);
     expect(confirmedSeconds(normal)).toBe(60);
     const away = advanceTimer(normal, start + 240_001);
-    expect(confirmedSeconds(away)).toBe(60);
-    expect(away.mode).toBe('review');
-    expect(away.uncertainMs).toBe(180_001);
-    expect(advanceTimer(away, start + 900_000)).toBe(away);
-    expect(confirmedSeconds(resolveReview(away, true, start + 900_000))).toBe(240);
-    expect(confirmedSeconds(resolveReview(away, false, start + 900_000))).toBe(60);
+    expect(confirmedSeconds(away)).toBe(240);
+    expect(away.mode).toBe('running');
+    expect(away.uncertainMs).toBe(0);
+    expect(advanceTimer(away, start + 240_001).confirmedMs).toBe(240_001);
+    expect(confirmedSeconds(advanceTimer(away, start + 900_000))).toBe(900);
   });
   it('excludes explicit pauses and preserves the starting date and goal', () => {
     const paused = pauseTimer(timer(), start + 60_000);
@@ -32,7 +31,11 @@ describe('elapsed time and review', () => {
     expect(next.id).toBe(timer().id);
   });
   it('reviews even a short running recovery gap, but never a paused gap', () => {
-    expect(recoverTimer(timer(), start + 1_000).mode).toBe('review');
+    const recovered = recoverTimer(timer(), start + 1_000);
+    expect(recovered.mode).toBe('review');
+    expect(advanceTimer(recovered, start + 900_000)).toBe(recovered);
+    expect(confirmedSeconds(resolveReview(recovered, true, start + 900_000))).toBe(1);
+    expect(confirmedSeconds(resolveReview(recovered, false, start + 900_000))).toBe(0);
     const paused = pauseTimer(timer(), start + 60_000);
     expect(recoverTimer(paused, start + 900_000)).toBe(paused);
   });
@@ -43,13 +46,14 @@ describe('elapsed time and review', () => {
     expect(after.confirmedMs).toBe(60_000);
     expect(after.uncertainMs).toBe(0);
   });
-  it('re-arms a presence check two hours after confirmation', () => {
+  it('keeps running past the former presence threshold', () => {
     const before = { ...timer(), confirmedMs: 180 * 60_000 - 1_000 };
-    const review = advanceTimer(before, start + 1_000);
-    expect(review.reviewReason).toBe('presence');
-    const resolved = resolveReview(review, false, start + 60_000);
-    expect(resolved.mode).toBe('paused');
-    expect(resolved.nextPresenceMs).toBe(300 * 60_000);
+    const next = advanceTimer(before, start + 1_000);
+    expect(next.mode).toBe('running');
+    expect(next.reviewReason).toBeNull();
+    const later = advanceTimer(next, start + 4 * 3_600_000 + 1_000);
+    expect(later.mode).toBe('running');
+    expect(confirmedSeconds(later)).toBe(7 * 3_600);
   });
 });
 

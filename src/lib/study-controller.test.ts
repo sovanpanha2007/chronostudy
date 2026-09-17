@@ -18,8 +18,8 @@ beforeEach(() => {
   writes = vi.fn((key: string, value: string) => { values.set(key, value); });
   vi.stubGlobal('localStorage', { getItem: (key: string) => values.get(key) ?? null, setItem: writes });
   vi.stubGlobal('navigator', { onLine: false, locks: { request: vi.fn(async (_name, _options, callback) => callback()) } });
-  vi.stubGlobal('window', { setInterval, clearInterval, addEventListener: vi.fn(), removeEventListener: vi.fn() });
-  vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  vi.stubGlobal('window', Object.assign(new EventTarget(), { setInterval, clearInterval }));
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
   api.getSession.mockResolvedValue({ data: { session: { user: { id: profile.id } } } });
   api.onAuthStateChange.mockReturnValue({ data: { subscription: { unsubscribe: vi.fn() } } });
 });
@@ -27,6 +27,50 @@ afterEach(async () => { cleanups.forEach((cleanup) => cleanup()); await Promise.
 function mount() { const controller = new StudyController(profile, summary); cleanups.push(controller.mount()); return controller; }
 
 describe('timer persistence orchestration', () => {
+  it('catches up after background callbacks stop and persists one checkpoint on return', async () => {
+    const controller = mount(); controller.start('Math');
+    Object.assign(document, { visibilityState: 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(controller.getSnapshot().store.active?.mode).toBe('running');
+    // Change wall time without executing intervals, as with a suspended tab.
+    vi.setSystemTime(start + 4 * 3_600_000);
+    Object.assign(document, { visibilityState: 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(controller.getSnapshot().store.active).toMatchObject({
+      mode: 'running', confirmedMs: 4 * 3_600_000, uncertainMs: 0, reviewReason: null,
+    });
+    const durable = JSON.parse(values.get(storageKey(profile.id))!);
+    expect(durable.active.confirmedMs).toBe(4 * 3_600_000);
+    expect(Object.values(durable.pending)).toMatchObject([{ finalize: false, timer: { confirmedMs: 4 * 3_600_000 } }]);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.getSnapshot().store.active?.confirmedMs).toBe(4 * 3_600_000 + 1_000);
+    expect(Object.keys(controller.getSnapshot().store.pending)).toHaveLength(1);
+  });
+  it('counts a delayed background tick and excludes a manually paused background interval', async () => {
+    const controller = mount(); controller.start('Math');
+    vi.setSystemTime(start + 600_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(controller.getSnapshot().store.active).toMatchObject({ mode: 'running', confirmedMs: 601_000 });
+    controller.pause();
+    vi.setSystemTime(start + 3_600_000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(controller.getSnapshot().store.active).toMatchObject({ mode: 'paused', confirmedMs: 601_000 });
+    controller.resume();
+    vi.setSystemTime(start + 4_200_000);
+    controller.stop();
+    expect(controller.getSnapshot().store.active).toBeNull();
+    expect(Object.values(controller.getSnapshot().store.pending)).toMatchObject([
+      { finalize: true, timer: { confirmedMs: 1_201_000 } },
+    ]);
+  });
+  it('checkpoints on pagehide without pausing', () => {
+    const controller = mount(); controller.start('Math');
+    vi.setSystemTime(start + 600_000);
+    window.dispatchEvent(new Event('pagehide'));
+    expect(controller.getSnapshot().store.active).toMatchObject({ mode: 'running', confirmedMs: 600_000 });
+    expect(Object.values(controller.getSnapshot().store.pending)).toMatchObject([{ finalize: false, timer: { confirmedMs: 600_000 } }]);
+  });
   it('makes no request on start and creates one checkpoint at five minutes', async () => {
     const controller = mount(); controller.start('Math');
     await vi.advanceTimersByTimeAsync(299_000);
