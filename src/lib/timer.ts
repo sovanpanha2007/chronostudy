@@ -2,7 +2,6 @@ import type { Profile, StudySession } from './types';
 import { resolveSessionDate } from './time';
 
 export const MINIMUM_SECONDS = 300;
-export const UNCERTAIN_GAP_MS = 120_000;
 
 export type TimerState = {
   id: string;
@@ -17,7 +16,7 @@ export type TimerState = {
   uncertainMs: number;
   mode: 'running' | 'paused' | 'review';
   reviewReason: 'away' | 'presence' | null;
-  nextPresenceMs: number;
+  nextPresenceMs: number; // Retained for compatibility with saved v1 timers; no longer triggers checks.
   revision: number;
   lastQueuedSeconds: number;
 };
@@ -44,13 +43,12 @@ export function newTimer(profile: Profile, subject: string, now: number, id: str
 export function advanceTimer(timer: TimerState, now: number): TimerState {
   if (timer.mode !== 'running') return timer;
   const delta = now - timer.lastAt;
-  if (delta < 0 || delta > UNCERTAIN_GAP_MS) {
+  if (delta < 0) {
     return { ...timer, lastAt: now, uncertainMs: Math.max(0, delta), mode: 'review', reviewReason: 'away', revision: timer.revision + 1 };
   }
-  const confirmedMs = timer.confirmedMs + delta;
-  const presence = confirmedMs >= timer.nextPresenceMs;
-  return { ...timer, confirmedMs, lastAt: now, mode: presence ? 'review' : 'running',
-    reviewReason: presence ? 'presence' : null, revision: timer.revision + 1 };
+  // Elapsed time counts even when the browser delays callbacks in the background.
+  return { ...timer, confirmedMs: timer.confirmedMs + delta, lastAt: now,
+    revision: timer.revision + 1 };
 }
 
 export function recoverTimer(timer: TimerState, now: number): TimerState {

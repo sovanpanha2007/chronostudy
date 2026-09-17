@@ -117,16 +117,18 @@ export class StudyController {
         this.emit();
         if (Date.now() >= this.retryAt) void this.flush(generation);
       };
-      const hidden = () => {
-        if (!this.ready) return;
-        if (this.store.active?.mode === 'running') this.store = { ...this.store, active: advanceTimer(this.store.active, Date.now()) };
+      const checkpoint = () => {
+        if (!this.ready || this.storageFailed) return;
+        // Catch up and queue elapsed background time immediately on return.
+        tick();
+        if (this.storageFailed) return;
         this.persist();
         this.emit();
       };
       const reconnect = () => { this.retryAt = 0; this.attempts = 0; void this.flush(generation); };
       const timer = window.setInterval(tick, 1000);
-      document.addEventListener('visibilitychange', hidden);
-      window.addEventListener('pagehide', hidden);
+      document.addEventListener('visibilitychange', checkpoint);
+      window.addEventListener('pagehide', checkpoint);
       window.addEventListener('online', reconnect);
       const client = createClient();
       const { data: auth } = client.auth.onAuthStateChange((event, session) => {
@@ -147,8 +149,8 @@ export class StudyController {
       void this.flush(generation);
       await new Promise<void>((resolve) => { release = resolve; if (!live()) resolve(); });
       window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', hidden);
-      window.removeEventListener('pagehide', hidden);
+      document.removeEventListener('visibilitychange', checkpoint);
+      window.removeEventListener('pagehide', checkpoint);
       window.removeEventListener('online', reconnect);
       auth.subscription.unsubscribe();
       this.leader = false;

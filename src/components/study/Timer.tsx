@@ -33,6 +33,7 @@ export function Timer({ controller, snapshot }: { controller: StudyController; s
       {!timer ? <button className="button primary min-w-52" disabled={disabled} onClick={() => controller.start(subject)}><span aria-hidden="true">▶</span> Start focusing</button>
         : <><button className="button primary min-w-36" disabled={disabled || timer.mode === 'review'} onClick={() => running ? controller.pause() : controller.resume()}>{running ? 'Ⅱ Pause' : '▶ Resume'}</button><button className="button secondary" disabled={disabled || timer.mode === 'review'} onClick={() => controller.stop()}>■ Finish</button></>}
     </div>
+    {running && <p className="mt-5 max-w-sm text-xs leading-5 text-muted">Keep this tab open and work anywhere. Your timer keeps counting in the background.</p>}
     <p className="mt-5 max-w-sm text-xs leading-5 text-muted">{snapshot.status}</p>
   </section>;
 }
