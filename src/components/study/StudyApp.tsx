@@ -9,6 +9,7 @@ import { dateLabel, formatDuration } from '@/lib/time';
 import type { Profile, StudySession, StudySummary } from '@/lib/types';
 import { Brand } from '@/components/Brand';
 import { Timer } from './Timer';
+import { TabTitle } from './TabTitle';
 import { Heatmap } from './Heatmap';
 import { SessionLog, SessionRows } from './SessionLog';
 import { Modal } from '@/components/ui/Modal';
@@ -61,6 +62,7 @@ export function StudyApp({ profile, initialSummary }: { profile: Profile; initia
   }
   const review = store.active?.mode === 'review' ? store.active : null;
   return <div className="mx-auto w-full max-w-[1160px] px-5 sm:px-9">
+    <TabTitle snapshot={snapshot} />
     <header className="flex min-h-24 items-center justify-between gap-4 border-b border-line"><Brand /><div className="flex items-center gap-3 sm:gap-5"><div className="text-right"><p className="max-w-32 truncate text-sm">{currentProfile.display_name}</p><p className="mt-1 text-[10px] uppercase tracking-widest text-accent">{currentBadge?.name ?? 'A new beginning'}</p></div><button aria-label="Open settings" className="icon-button" onClick={() => setSettings(true)}><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="3" fill="var(--color-background)" /><circle cx="16" cy="17" r="3" fill="var(--color-background)" /></svg></button></div></header>
     <main id="main" className="pb-8">
       <Timer controller={controller} snapshot={snapshot} />
